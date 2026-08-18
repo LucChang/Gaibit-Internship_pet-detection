@@ -1,0 +1,17 @@
+# Ultralytics 🚀 StrongSORT / BoT-SORT Tuned Configuration for Pet & CCTV Object Tracking
+# Docs: https://docs.ultralytics.com/modes/track
+
+tracker_type: botsort # StrongSORT / BoT-SORT tracker backend
+track_high_thresh: 0.25 # (float) First-stage match threshold
+track_low_thresh: 0.1 # (float) Second-stage threshold for low-score matches
+new_track_thresh: 0.35 # (float) Start a new track threshold (prevents false tracks)
+track_buffer: 60 # (int) Frames to keep lost tracks alive (60 frames ~ 5 seconds at 12fps)
+match_thresh: 0.6 # (float) Association similarity threshold
+fuse_score: True # (bool) Fuse detection score with motion/IoU for matching
+
+# StrongSORT / BoT-SORT Specific Optimizations:
+gmc_method: none # (str) Global Motion Compensation (GMC) method: none / orb
+proximity_thresh: 0.5 # (float) Min IoU to consider tracks proximate for ReID/association
+appearance_thresh: 0.25 # (float) Appearance similarity threshold
+with_reid: False # (bool) ReID model integration setting
+model: osnet_x0_25_msmt17.pt # (str) ReID model weight file path

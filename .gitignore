@@ -1,0 +1,42 @@
+# Python cache and bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environments
+.venv/
+venv/
+env/
+ENV/
+
+# Log files
+*.log
+video_download.log
+
+# Model weights & Checkpoints
+*.pt
+*.pth
+*.onnx
+*.engine
+*.weights
+*.tflite
+*.h5
+
+# YOLO output & experiment tracking
+runs/
+wandb/
+
+# Datasets and Test Video data
+Cat and Dog cctv.yolo26/
+video_test/
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# IDE & OS settings
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

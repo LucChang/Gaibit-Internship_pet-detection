@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CCTV 物件定位 & ROI 接觸事件紀錄儀表板</title>
+    <meta name="description" content="基於 YOLO26 與 StrongSORT 追蹤演算法之 CCTV 物件定位與動態 ROI 區域交集事件即時監控系統">
+    <!-- Google Fonts: Outfit & Inter -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Custom Stylesheet -->
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- 頂部 Header 品牌與狀態列 -->
+        <header class="app-header">
+            <div class="header-brand">
+                <div class="brand-icon" aria-hidden="true">
+                    <i class="fa-solid fa-camera-rotate"></i>
+                </div>
+                <div>
+                    <h1 class="brand-title">CCTV 物件定位 &amp; ROI 事件即時儀表板</h1>
+                    <p class="subtitle">YOLO26 Small Model &bull; StrongSORT Tracker &bull; Real-Time Spatial ROI Engine</p>
+                </div>
+            </div>
+            
+            <div class="header-controls">
+                <div class="video-selector-group">
+                    <div class="selector-field">
+                        <label for="folderSelect"><i class="fa-solid fa-video" aria-hidden="true"></i> 選擇監視器:</label>
+                        <select id="folderSelect" class="form-select" aria-label="選擇 CCTV 監視器頻道">
+                            <option value="">載入監視器中…</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="status-badge" aria-live="polite">
+                    <span class="pulse-dot" aria-hidden="true"></span>
+                    <span id="fpsBadge" class="tabular-num">FPS: --</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- 頂部關鍵指標統計卡片列 -->
+        <section class="stats-row" aria-label="系統即時數據統計">
+            <div class="stat-card stat-blue">
+                <div class="stat-icon"><i class="fa-solid fa-bell" aria-hidden="true"></i></div>
+                <div class="stat-info">
+                    <span class="stat-value tabular-num" id="statTotalEvents">0</span>
+                    <span class="stat-label">總累積事件數</span>
+                </div>
+            </div>
+            <div class="stat-card stat-green">
+                <div class="stat-icon"><i class="fa-solid fa-bullseye" aria-hidden="true"></i></div>
+                <div class="stat-info">
+                    <span class="stat-value tabular-num" id="statActiveContacts">0</span>
+                    <span class="stat-label">當前 ROI 接觸中</span>
+                </div>
+            </div>
+            <div class="stat-card stat-purple">
+                <div class="stat-icon"><i class="fa-solid fa-paw" aria-hidden="true"></i></div>
+                <div class="stat-info">
+                    <span class="stat-value tabular-num" id="statActiveObjects">0</span>
+                    <span class="stat-label">畫面即時定位數</span>
+                </div>
+            </div>
+            <div class="stat-card stat-amber">
+                <div class="stat-icon"><i class="fa-solid fa-draw-polygon" aria-hidden="true"></i></div>
+                <div class="stat-info">
+                    <span class="stat-value tabular-num" id="statRoiCount">0</span>
+                    <span class="stat-label">運作中 ROI 數量</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- 主區域：左側即時畫面與畫布，右側歷史事件紀錄 -->
+        <main class="main-grid">
+            <!-- 左側欄：即時串流畫面與動態 ROI 劃定畫布 -->
+            <section class="card video-section" aria-labelledby="videoHeader">
+                <div class="card-header">
+                    <h2 id="videoHeader"><i class="fa-solid fa-display" aria-hidden="true"></i> 即時 CCTV 影像分析 (滑鼠拖曳拉框標記)</h2>
+                    <div class="card-actions">
+                        <button id="btnDrawMode" class="btn btn-outline active" aria-label="滑鼠拉框標記模式">
+                            <i class="fa-solid fa-vector-square" aria-hidden="true"></i> 滑鼠劃定模式
+                        </button>
+                    </div>
+                </div>
+
+                <div class="video-container" id="videoWrapper">
+                    <div class="video-overlay-badge">
+                        <span class="live-indicator"><span class="live-dot"></span>LIVE STREAM</span>
+                        <span class="model-tag">YOLO26-S</span>
+                    </div>
+                    <img id="videoStream" src="/video_feed" alt="CCTV 即時影像串流">
+                    <canvas id="roiCanvas" aria-label="ROI 繪製畫布"></canvas>
+                </div>
+
+                <!-- ROI 類別屬性設定與劃定面板 -->
+                <div class="roi-control-panel">
+                    <div class="panel-title">
+                        <h3><i class="fa-solid fa-sliders" aria-hidden="true"></i> 劃定新 ROI 類別屬性設定</h3>
+                    </div>
+
+                    <form id="roiForm" class="roi-form-grid" onSubmit="return false;">
+                        <div class="form-group">
+                            <label for="inputRoiCategory">ROI 預設類別:</label>
+                            <select id="inputRoiCategory" class="form-select">
+                                <option value="飲食區 Food">飲食區 Food</option>
+                                <option value="休息區 Rest">休息區 Rest</option>
+                                <option value="通道 Doorway">通道 Doorway</option>
+                                <option value="危險區 Hazard">危險區 Hazard</option>
+                                <option value="CUSTOM">自訂類別 (Custom Name)…</option>
+                            </select>
+                        </div>
+                        <div class="form-group" id="customCategoryGroup" style="display: none;">
+                            <label for="inputCustomCategory">自訂類別名稱:</label>
+                            <input type="text" id="inputCustomCategory" class="form-input" placeholder="例如: 貓砂盆, 沙發區">
+                        </div>
+                        <div class="form-group">
+                            <label for="inputRoiColor">標籤顏色:</label>
+                            <div class="color-picker-wrapper">
+                                <input type="color" id="inputRoiColor" class="form-color" value="#00E676" title="選擇 ROI 標籤顏色">
+                            </div>
+                        </div>
+                    </form>
+
+                    <div class="drawing-hint">
+                        <i class="fa-solid fa-circle-info" aria-hidden="true"></i>
+                        <span>提示：請直接在上方影片畫面上，按住滑鼠左鍵並拖曳劃定矩形框即可即時套用！</span>
+                    </div>
+
+                    <!-- 已運作之 ROI 標籤清單 -->
+                    <div class="active-rois-list">
+                        <h4>運作中之 ROI 區域標籤:</h4>
+                        <div id="roisContainer" class="roi-pills-wrapper">
+                            <!-- JS 動態產生 -->
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 右側欄：即時事件日誌與過濾表格 -->
+            <section class="card log-section" aria-labelledby="logHeader">
+                <div class="card-header">
+                    <h2 id="logHeader"><i class="fa-solid fa-list-check" aria-hidden="true"></i> 物件 &amp; ROI 接觸觸發事件日誌</h2>
+                    <div class="card-actions">
+                        <button id="btnClearLogs" class="btn btn-outline-danger btn-sm" aria-label="清除事件紀錄">
+                            <i class="fa-solid fa-trash-can" aria-hidden="true"></i> 清除紀錄
+                        </button>
+                        <a href="/api/export_csv" class="btn btn-success btn-sm" id="btnExportCsv" aria-label="匯出事件日誌為 CSV 檔案">
+                            <i class="fa-solid fa-file-csv" aria-hidden="true"></i> 匯出 CSV
+                        </a>
+                    </div>
+                </div>
+
+                <!-- 搜尋與類別過濾列 -->
+                <div class="table-toolbar">
+                    <div class="search-box">
+                        <i class="fa-solid fa-magnifying-glass search-icon" aria-hidden="true"></i>
+                        <input type="text" id="inputLogSearch" class="form-input" placeholder="搜尋物件 ID 或 ROI 類別…" aria-label="搜尋物件 ID 或 ROI 類別">
+                    </div>
+                    <div class="filter-group">
+                        <select id="selectEventFilter" class="form-select" aria-label="過濾觸發事件類型">
+                            <option value="ALL">全部事件 (ALL)</option>
+                            <option value="ENTER">僅進入 (ENTER)</option>
+                            <option value="EXIT">僅離開 (EXIT)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- 即時日誌表格 -->
+                <div class="table-responsive">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th scope="col">時間 (Time)</th>
+                                <th scope="col">物件 ID</th>
+                                <th scope="col">接觸 ROI 類別</th>
+                                <th scope="col">觸發狀態</th>
+                                <th scope="col">停留時間</th>
+                            </tr>
+                        </thead>
+                        <tbody id="eventsTableBody">
+                            <tr>
+                                <td colspan="5" class="empty-msg"><i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i> 載入事件紀錄中…</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Main JavaScript Logic -->
+    <script src="/static/js/main.js"></script>
+</body>
+</html>

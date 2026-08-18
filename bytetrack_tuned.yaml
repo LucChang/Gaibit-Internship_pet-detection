@@ -1,0 +1,10 @@
+# Ultralytics 🚀 ByteTrack Tuned Configuration for Pet & Low-FPS Video Tracking
+# Docs: https://docs.ultralytics.com/modes/track
+
+tracker_type: bytetrack # (str) Tracker backend: bytetrack
+track_high_thresh: 0.25 # (float) First-stage match threshold
+track_low_thresh: 0.1 # (float) Second-stage threshold for low-score matches
+new_track_thresh: 0.35 # (float) Start a new track if no match ≥ this (higher avoids false tracks)
+track_buffer: 60 # (int) Frames to keep lost tracks alive (60 frames ~ 5 seconds at 12fps)
+match_thresh: 0.5 # (float) Association similarity threshold (IoU/cost); 0.5 handles larger frame-to-frame movements
+fuse_score: True # (bool) Fuse detection score with motion/IoU for matching
