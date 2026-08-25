@@ -1,10 +1,12 @@
 import csv
 import io
+import json
 import math
 import os
 import subprocess
 import sys
 import time
+import threading
 from collections import defaultdict, deque
 from threading import Lock
 
@@ -33,26 +35,205 @@ current_video_path = find_default_video()
 model = None
 model_path = None
 
-# ROI 列表: [{ id, category, color, x, y, w, h }]
-rois = [
-    {
-        "id": "roi_default_1",
-        "category": "飲食區 Food",
-        "color": "#FF5722",
-        "x": 0.15, "y": 0.20, "w": 0.30, "h": 0.35
-    },
-    {
-        "id": "roi_default_2",
-        "category": "休息區 Rest",
-        "color": "#4CAF50",
-        "x": 0.55, "y": 0.45, "w": 0.35, "h": 0.40
-    }
-]
+# ROI 列表記憶與持久化機制 (分監視器/資料夾儲存於 roi_config.json)
+ROI_CONFIG_FILE = "roi_config.json"
+
+def get_camera_key(video_path=None):
+    """取得目前影片所在的監視器/資料夾識別 Key"""
+    path = video_path or current_video_path
+    folder = os.path.dirname(path) or "."
+    return os.path.normpath(folder).replace("\\", "/")
+
+def load_roi_config(camera_key=None):
+    """從 roi_config.json 讀取特定監視器/資料夾的 ROI 設定"""
+    global rois
+    if camera_key is None:
+        camera_key = get_camera_key()
+    
+    if os.path.exists(ROI_CONFIG_FILE):
+        try:
+            with open(ROI_CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                with data_lock:
+                    rois = data.get(camera_key, [])
+                    return
+        except Exception as e:
+            print(f"[警告] 讀取 ROI 記憶設定檔失敗: {e}")
+    
+    with data_lock:
+        rois = []
+
+def save_roi_config(camera_key=None):
+    """將目前監視器/資料夾的 ROI 設定存入 roi_config.json"""
+    if camera_key is None:
+        camera_key = get_camera_key()
+    
+    all_configs = {}
+    if os.path.exists(ROI_CONFIG_FILE):
+        try:
+            with open(ROI_CONFIG_FILE, "r", encoding="utf-8") as f:
+                all_configs = json.load(f)
+        except Exception:
+            all_configs = {}
+    
+    with data_lock:
+        all_configs[camera_key] = list(rois)
+    
+    try:
+        with open(ROI_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(all_configs, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[錯誤] 儲存 ROI 記憶設定檔失敗: {e}")
+
+# 初始化 ROI 列表並自動載入記憶紀錄
+rois = []
+load_roi_config()
 
 # 事件紀錄列表
 event_logs = []
 active_contacts = {} # key: f"{stable_id}_{roi_id}" -> { start_frame, start_sec, last_seen_frame, roi_category }
 next_event_id = 1
+
+# 自動擷取片段影片存放目錄
+CLIPS_DIR = os.path.join("static", "clips")
+os.makedirs(CLIPS_DIR, exist_ok=True)
+
+def generate_clip_async(video_path, start_sec, end_sec, event_ids, object_id, category):
+    """背景非同步剪輯接觸事件前後 10 秒影片片段（包含 YOLO 標註與 ROI 標籤）"""
+    def _worker():
+        try:
+            # 稍作等待以確保當前即時串流影片幀已推進過 (end_sec + 10 秒)
+            time.sleep(10.0)
+            
+            if not os.path.exists(video_path):
+                print(f"[警告] 來源影片檔不存在: {video_path}")
+                return
+
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                print(f"[警告] 無法開啟影片檔進行剪輯: {video_path}")
+                return
+            
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            if fps <= 0 or np.isnan(fps):
+                fps = 30.0
+            
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            total_dur = total_frames / fps
+            
+            c_start_sec = max(0.0, start_sec - 10.0)
+            c_end_sec = min(total_dur, end_sec + 10.0)
+            
+            start_frame = int(c_start_sec * fps)
+            end_frame = int(c_end_sec * fps)
+            
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            
+            clean_cat = str(category).replace(" ", "_").replace("/", "_")
+            clean_obj = str(object_id).replace("#", "")
+            filename = f"clip_evt_{event_ids[0]}_cat_{clean_obj}_{clean_cat}_{int(start_sec)}.mp4"
+            out_path = os.path.join(CLIPS_DIR, filename)
+            rel_url = f"/static/clips/{filename}"
+            
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(out_path, fourcc, fps, (width, height))
+            
+            # 載入獨立推論模型與 ROI 標籤
+            clip_model = YOLO(find_best_pt_model())
+            tracker_config = "strongsort_tuned.yaml" if os.path.exists("strongsort_tuned.yaml") else ("botsort.yaml" if os.path.exists("botsort.yaml") else "bytetrack.yaml")
+            clip_smoother = TrackIDSmoother(max_dist=100.0)
+            
+            with data_lock:
+                current_rois = list(rois)
+
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+            f_idx = start_frame
+            clip_frame_count = 0
+            
+            while f_idx <= end_frame:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                
+                clip_frame_count += 1
+                h_f, w_f, _ = frame.shape
+                
+                # 執行物件推論與標註
+                results = clip_model.track(
+                    source=frame,
+                    conf=0.25,
+                    iou=0.45,
+                    imgsz=640,
+                    tracker=tracker_config,
+                    persist=True,
+                    verbose=False
+                )
+                
+                # 1. 繪製 ROI 框
+                for r in current_rois:
+                    rx1 = int(r['x'] * w_f)
+                    ry1 = int(r['y'] * h_f)
+                    rx2 = int((r['x'] + r['w']) * w_f)
+                    ry2 = int((r['y'] + r['h']) * h_f)
+                    color_bgr = hex_to_bgr(r['color'])
+                    cv2.rectangle(frame, (rx1, ry1), (rx2, ry2), color_bgr, 2)
+                    badge_text = f"ROI: {r['category']}"
+                    (tw, th), _ = cv2.getTextSize(badge_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                    cv2.rectangle(frame, (rx1, max(0, ry1 - 22)), (rx1 + tw + 10, ry1), color_bgr, -1)
+                    cv2.putText(frame, badge_text, (rx1 + 5, max(12, ry1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1, cv2.LINE_AA)
+
+                # 2. 繪製偵測物件與追蹤標籤
+                active_ids = []
+                positions = {}
+                if len(results) > 0 and results[0].boxes is not None:
+                    boxes = results[0].boxes
+                    for box in boxes:
+                        x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+                        conf = float(box.conf[0])
+                        cls_id = int(box.cls[0])
+                        cls_name = clip_model.names.get(cls_id, str(cls_id)) if hasattr(clip_model, 'names') else str(cls_id)
+                        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                        
+                        raw_id = int(box.id[0]) if box.id is not None else None
+                        if cls_name not in ['bowl', 'litter_box']:
+                            if raw_id is None:
+                                raw_id = 99000 + (cls_id * 1000) + (cx % 1000)
+                            stable_id = clip_smoother.update(raw_id, cx, cy, cls_id, clip_frame_count)
+                            active_ids.append(stable_id)
+                            positions[stable_id] = {'last_pos': (cx, cy), 'cls_id': cls_id}
+                        else:
+                            stable_id = None
+                        
+                        if cls_name in ['bowl', 'litter_box']:
+                            obj_color = hex_to_bgr("#FF5722") if cls_name == 'bowl' else hex_to_bgr("#29B6F6")
+                            label = f"{cls_name} ({conf:.2f})"
+                        else:
+                            obj_color = hex_to_bgr(COLOR_HEX_LIST[stable_id % len(COLOR_HEX_LIST)]) if stable_id else (0, 255, 0)
+                            label = f"#{stable_id} ({conf:.2f})" if stable_id else f"{cls_name} ({conf:.2f})"
+
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), obj_color, 2)
+                        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                        ty1 = max(y1, th + 8)
+                        cv2.rectangle(frame, (x1, ty1 - th - 4), (x1 + tw + 6, ty1 + 2), obj_color, -1)
+                        cv2.putText(frame, label, (x1 + 3, ty1 - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+                
+                clip_smoother.post_frame_update(clip_frame_count, active_ids, positions)
+                out.write(frame)
+                f_idx += 1
+                
+            cap.release()
+            out.release()
+            
+            with data_lock:
+                for evt in event_logs:
+                    if evt.get('id') in event_ids:
+                        evt['clip_url'] = rel_url
+            print(f"[系統] 已成功生成包含 YOLO 標註與 ROI 標籤之前後 10 秒影片片段: {filename}")
+        except Exception as e:
+            print(f"[錯誤] 剪輯影片過程發生異常: {e}")
+            
+    threading.Thread(target=_worker, daemon=True).start()
 
 # 系統即時數據
 system_status = {
@@ -82,11 +263,14 @@ def hex_to_bgr(hex_color):
 def find_best_pt_model():
     """自動搜尋最優模型檔 best.pt"""
     candidates = [
-        os.path.join("runs", "detect", "runs", "detect", "train_yolo26_small-2", "weights", "best.pt"),
-        os.path.join("runs", "detect", "runs", "detect", "train_yolo11", "weights", "best.pt"),
-        os.path.join("runs", "detect", "train_yolo11", "weights", "best.pt"),
-        os.path.join("runs", "detect", "train_yolo26n_pet_boxes", "weights", "best.pt"),
-        "best.pt"
+        # os.path.join("runs", "detect", "runs", "detect", "colab_yolo_p2_highres-2", "weights", "best.pt")
+        # os.path.join("runs", "detect", "runs", "detect", "colab_yolo_p2_highres", "weights", "best.pt"),
+        os.path.join("runs", "detect", "runs", "detect", "train_yolo26_small-3", "weights", "best.pt"),
+        # os.path.join("runs", "detect", "runs", "detect", "train_yolo26_small-2", "weights", "best.pt"),
+        # os.path.join("runs", "detect", "runs", "detect", "train_yolo11", "weights", "best.pt"),
+        # os.path.join("runs", "detect", "train_yolo11", "weights", "best.pt"),
+        # os.path.join("runs", "detect", "train_yolo26n_pet_boxes", "weights", "best.pt"),
+        # "best.pt"
     ]
     for path in candidates:
         if os.path.exists(path):
@@ -210,6 +394,7 @@ def generate_video_stream():
 
             cap.release()
             current_video_path = next_video
+            load_roi_config()
             cap = cv2.VideoCapture(current_video_path)
             if not cap.isOpened():
                 print(f"[警告] 無法自動切換至下一支影片: {next_video}")
@@ -252,10 +437,15 @@ def generate_video_stream():
                 x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
                 conf = float(box.conf[0])
                 cls_id = int(box.cls[0])
+                cls_name = model.names.get(cls_id, str(cls_id)) if hasattr(model, 'names') else str(cls_id)
                 cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
 
+
+
                 raw_id = int(box.id[0]) if box.id is not None else None
-                if raw_id is not None:
+                if cls_name not in ['bowl', 'litter_box']:
+                    if raw_id is None:
+                        raw_id = 99000 + (cls_id * 1000) + (cx % 1000)
                     stable_id = id_smoother.update(raw_id, cx, cy, cls_id, frame_count)
                     active_stable_ids.append(stable_id)
                     current_positions[stable_id] = {'last_pos': (cx, cy), 'cls_id': cls_id}
@@ -266,7 +456,9 @@ def generate_video_stream():
                     'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2,
                     'cx': cx, 'cy': cy,
                     'stable_id': stable_id,
-                    'conf': conf
+                    'conf': conf,
+                    'cls_id': cls_id,
+                    'cls_name': cls_name
                 })
 
         id_smoother.post_frame_update(frame_count, active_stable_ids, current_positions)
@@ -280,32 +472,75 @@ def generate_video_stream():
         with data_lock:
             current_rois = list(rois)
 
-        for roi in current_rois:
-            rx1 = int(roi['x'] * w_frame)
-            ry1 = int(roi['y'] * h_frame)
-            rx2 = int((roi['x'] + roi['w']) * w_frame)
-            ry2 = int((roi['y'] + roi['h']) * h_frame)
+        # -------------------------------------------------------------
+        # ROI / Target 交集計算 (貓咪涵蓋率 >= 15% 或 中心點在 ROI 內)
+        # -------------------------------------------------------------
+        targets = []
+        roi_cat_set = set()
+        
+        with data_lock:
+            current_rois = list(rois)
+
+        for r in current_rois:
+            targets.append({
+                'id': r['id'],
+                'category': r['category'],
+                'color': r['color'],
+                'x1': int(r['x'] * w_frame),
+                'y1': int(r['y'] * h_frame),
+                'x2': int((r['x'] + r['w']) * w_frame),
+                'y2': int((r['y'] + r['h']) * h_frame),
+                'is_roi': True
+            })
+            roi_cat_set.add(r['category'])
+
+        for obj in detected_objects:
+            if obj['cls_name'] in ['bowl', 'litter_box'] and obj['cls_name'] not in roi_cat_set:
+                targets.append({
+                    'id': f"det_{obj['cls_name']}",
+                    'category': obj['cls_name'],
+                    'color': "#FF5722" if obj['cls_name'] == 'bowl' else "#29B6F6",
+                    'x1': obj['x1'],
+                    'y1': obj['y1'],
+                    'x2': obj['x2'],
+                    'y2': obj['y2'],
+                    'is_roi': False
+                })
+
+        current_frame_contacts = set()
+        active_target_hits = {}
+
+        for target in targets:
+            tx1, ty1, tx2, ty2 = target['x1'], target['y1'], target['x2'], target['y2']
+            target_area = max(1, (tx2 - tx1) * (ty2 - ty1))
 
             for obj in detected_objects:
                 if obj['stable_id'] is None:
                     continue
 
                 ox1, oy1, ox2, oy2 = obj['x1'], obj['y1'], obj['x2'], obj['y2']
+                obj_area = max(1, (ox2 - ox1) * (oy2 - oy1))
                 
-                ix1 = max(ox1, rx1)
-                iy1 = max(oy1, ry1)
-                ix2 = min(ox2, rx2)
-                iy2 = min(oy2, ry2)
+                ix1 = max(ox1, tx1)
+                iy1 = max(oy1, ty1)
+                ix2 = min(ox2, tx2)
+                iy2 = min(oy2, ty2)
 
                 inter_w = max(0, ix2 - ix1)
                 inter_h = max(0, iy2 - iy1)
                 inter_area = inter_w * inter_h
-                obj_area = (ox2 - ox1) * (oy2 - oy1)
+                union_area = obj_area + target_area - inter_area
 
-                if inter_area > 0 and (inter_area / max(1, obj_area)) >= 0.05:
-                    contact_key = f"{obj['stable_id']}_{roi['id']}"
+                iou = (inter_area / union_area) if union_area > 0 else 0.0
+                cat_coverage = (inter_area / obj_area) if obj_area > 0 else 0.0
+                center_in_target = (tx1 <= obj['cx'] <= tx2) and (ty1 <= obj['cy'] <= ty2)
+
+                # 接觸判定條件：貓咪 15% 進入 ROI、或中心點在 ROI 內、或 IoU >= 10%
+                is_contacting = (cat_coverage >= 0.15) or center_in_target or (iou >= 0.10)
+
+                if is_contacting:
+                    contact_key = f"{obj['stable_id']}_{target['id']}"
                     current_frame_contacts.add(contact_key)
-                    active_roi_hit_ids.add(roi['id'])
 
                     if contact_key not in active_contacts:
                         active_contacts[contact_key] = {
@@ -313,76 +548,116 @@ def generate_video_stream():
                             'start_sec': video_time_sec,
                             'last_seen_frame': frame_count,
                             'object_id': obj['stable_id'],
-                            'roi_id': roi['id'],
-                            'roi_category': roi['category']
+                            'target_id': target['id'],
+                            'roi_category': target['category'],
+                            'event_logged': False
                         }
-                        
+                    else:
+                        active_contacts[contact_key]['last_seen_frame'] = frame_count
+
+                    dur_sec = round((frame_count - active_contacts[contact_key]['start_frame']) / fps_src, 1)
+                    active_target_hits[target['id']] = {
+                        'iou': round(max(iou * 100, cat_coverage * 100), 1),
+                        'duration_sec': dur_sec,
+                        'is_valid': dur_sec >= 1.0
+                    }
+
+                    # 接觸時立即記錄單一 CONTACT 事件
+                    if not active_contacts[contact_key]['event_logged']:
+                        active_contacts[contact_key]['event_logged'] = True
+                        contact_evt_id = next_event_id
+                        active_contacts[contact_key]['event_id'] = contact_evt_id
                         with data_lock:
                             event_logs.append({
-                                'id': next_event_id,
+                                'id': contact_evt_id,
                                 'time_str': time_str,
                                 'timestamp_sec': round(video_time_sec, 1),
                                 'frame_idx': frame_count,
                                 'object_id': f"#{obj['stable_id']}",
-                                'roi_category': roi['category'],
-                                'event_type': 'ENTER',
-                                'duration_sec': 0.0
+                                'roi_category': target['category'],
+                                'event_type': 'CONTACT',
+                                'duration_sec': dur_sec
                             })
                             next_event_id += 1
-                    else:
-                        active_contacts[contact_key]['last_seen_frame'] = frame_count
 
-        # 檢查離開事件 (EXIT)
+                        # 當下即觸發非同步剪輯 CONTACT 前後 10 秒影片片段
+                        generate_clip_async(
+                            video_path=current_video_path,
+                            start_sec=active_contacts[contact_key]['start_sec'],
+                            end_sec=video_time_sec,
+                            event_ids=[contact_evt_id],
+                            object_id=obj['stable_id'],
+                            category=target['category']
+                        )
+                    else:
+                        # 動態更新持續接觸秒數
+                        evt_id = active_contacts[contact_key]['event_id']
+                        with data_lock:
+                            for evt in event_logs:
+                                if evt.get('id') == evt_id:
+                                    evt['duration_sec'] = dur_sec
+
+        # 接觸結束清理與生成最終完整片段 (無 EXIT 事件)
         for c_key in list(active_contacts.keys()):
             if c_key not in current_frame_contacts:
                 info = active_contacts[c_key]
                 if (frame_count - info['last_seen_frame']) > 10:
                     dur_sec = round((info['last_seen_frame'] - info['start_frame']) / fps_src, 1)
-                    with data_lock:
-                        event_logs.append({
-                            'id': next_event_id,
-                            'time_str': time_str,
-                            'timestamp_sec': round(video_time_sec, 1),
-                            'frame_idx': frame_count,
-                            'object_id': f"#{info['object_id']}",
-                            'roi_category': info['roi_category'],
-                            'event_type': 'EXIT',
-                            'duration_sec': max(0.1, dur_sec)
-                        })
-                        next_event_id += 1
+                    if info['event_logged']:
+                        evt_id = info['event_id']
+                        with data_lock:
+                            for evt in event_logs:
+                                if evt.get('id') == evt_id:
+                                    evt['duration_sec'] = max(0.1, dur_sec)
+
+                        # 背景非同步觸發剪輯該接觸事件 (進入前 10s 至 離開後 10s) 完整影片片段
+                        end_sec = info['last_seen_frame'] / fps_src
+                        generate_clip_async(
+                            video_path=current_video_path,
+                            start_sec=info['start_sec'],
+                            end_sec=end_sec,
+                            event_ids=[evt_id],
+                            object_id=info['object_id'],
+                            category=info['roi_category']
+                        )
                     del active_contacts[c_key]
 
         # -------------------------------------------------------------
-        # 影像繪製與標註 (僅顯示 Track ID 與 信心度)
+        # 影像繪製與標註 (即時顯示 CONTACT 狀態與計時)
         # -------------------------------------------------------------
-        for roi in current_rois:
-            rx1 = int(roi['x'] * w_frame)
-            ry1 = int(roi['y'] * h_frame)
-            rx2 = int((roi['x'] + roi['w']) * w_frame)
-            ry2 = int((roi['y'] + roi['h']) * h_frame)
-            color_bgr = hex_to_bgr(roi['color'])
-            is_hit = roi['id'] in active_roi_hit_ids
+        for target in targets:
+            tx1, ty1, tx2, ty2 = target['x1'], target['y1'], target['x2'], target['y2']
+            color_bgr = hex_to_bgr(target['color'])
+            
+            hit_info = active_target_hits.get(target['id'])
+            is_hit = hit_info is not None
 
             thickness = 3 if is_hit else 2
-            cv2.rectangle(frame, (rx1, ry1), (rx2, ry2), color_bgr, thickness)
+            cv2.rectangle(frame, (tx1, ty1), (tx2, ty2), color_bgr, thickness)
 
-            badge_text = f"ROI: {roi['category']}"
+            badge_text = f"ROI: {target['category']}" if target['is_roi'] else f"Target: {target['category']}"
             if is_hit:
-                badge_text += " [CONTACT!]"
+                badge_text += f" [CONTACT! {hit_info['duration_sec']}s]"
 
             (tw, th), _ = cv2.getTextSize(badge_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-            cv2.rectangle(frame, (rx1, max(0, ry1 - 22)), (rx1 + tw + 10, ry1), color_bgr, -1)
-            cv2.putText(frame, badge_text, (rx1 + 5, max(12, ry1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1, cv2.LINE_AA)
+            cv2.rectangle(frame, (tx1, max(0, ty1 - 22)), (tx1 + tw + 10, ty1), color_bgr, -1)
+            cv2.putText(frame, badge_text, (tx1 + 5, max(12, ty1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1, cv2.LINE_AA)
 
         for obj in detected_objects:
             ox1, oy1, ox2, oy2 = obj['x1'], obj['y1'], obj['x2'], obj['y2']
             stable_id = obj['stable_id']
             conf = obj['conf']
+            cls_name = obj['cls_name']
 
-            obj_color = hex_to_bgr(COLOR_HEX_LIST[stable_id % len(COLOR_HEX_LIST)]) if stable_id else (0, 255, 0)
+            if cls_name in ['bowl', 'litter_box']:
+                obj_color = hex_to_bgr("#FF5722") if cls_name == 'bowl' else hex_to_bgr("#29B6F6")
+                label = f"{cls_name} ({conf:.2f})"
+            else:
+                obj_color = hex_to_bgr(COLOR_HEX_LIST[stable_id % len(COLOR_HEX_LIST)]) if stable_id else (0, 255, 0)
+                label = f"#{stable_id} ({conf:.2f})" if stable_id else f"{cls_name} ({conf:.2f})"
+
             cv2.rectangle(frame, (ox1, oy1), (ox2, oy2), obj_color, 2)
 
-            label = f"#{stable_id} ({conf:.2f})" if stable_id else f"({conf:.2f})"
             (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
             ty1 = max(oy1, th + 8)
             cv2.rectangle(frame, (ox1, ty1 - th - 4), (ox1 + tw + 6, ty1 + 2), obj_color, -1)
@@ -467,6 +742,7 @@ def select_folder():
         videos = find_videos_in_folder(folder)
         if videos:
             current_video_path = videos[0]
+            load_roi_config()
             return jsonify({"status": "success", "folder": folder, "video": os.path.basename(current_video_path)})
     return jsonify({"status": "error", "message": "資料夾不存在或無可用影片"}), 400
 
@@ -480,6 +756,7 @@ def select_video():
         target = os.path.normpath(os.path.join(folder, filename))
         if os.path.exists(target):
             current_video_path = target
+            load_roi_config()
             return jsonify({"status": "success", "folder": folder, "video": filename})
     return jsonify({"status": "error", "message": "檔案不存在"}), 400
 
@@ -491,6 +768,7 @@ def manage_rois():
         new_rois = data.get("rois", [])
         with data_lock:
             rois = new_rois
+        save_roi_config()
         return jsonify({"status": "success", "count": len(rois)})
     else:
         with data_lock:
@@ -501,7 +779,10 @@ def delete_roi(roi_id):
     global rois
     with data_lock:
         rois = [r for r in rois if r['id'] != roi_id]
+    save_roi_config()
     return jsonify({"status": "success", "remaining": len(rois)})
+
+
 
 @app.route("/api/events", methods=["GET"])
 def get_events():
@@ -524,12 +805,13 @@ def export_csv():
 
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["Event ID", "Video Time", "Timestamp (Sec)", "Frame", "Object ID", "ROI Category", "Event Type", "Duration (Sec)"])
+    writer.writerow(["Event ID", "Video Time", "Timestamp (Sec)", "Frame", "Object ID", "ROI Category", "Event Type", "Duration (Sec)", "Clip Video URL"])
     for row in logs_copy:
         writer.writerow([
             row['id'], row['time_str'], row['timestamp_sec'], row['frame_idx'],
             row['object_id'], row['roi_category'],
-            row['event_type'], row['duration_sec']
+            row['event_type'], row['duration_sec'],
+            row.get('clip_url', '')
         ])
     
     output.seek(0)

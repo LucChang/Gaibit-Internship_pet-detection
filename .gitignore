@@ -23,17 +23,27 @@ video_download.log
 *.tflite
 *.h5
 
+# Large Archives & Compression
+*.zip
+*.tar
+*.gz
+*.7z
+project_colab.zip
+
 # YOLO output & experiment tracking
 runs/
 wandb/
 
-# Datasets and Test Video data
-Cat and Dog cctv.yolo26/
-video_test/
+# Generated clips & temporary media
+static/clips/
 *.mp4
 *.avi
 *.mov
 *.mkv
+
+# Datasets and Test Video data
+Cat and Dog cctv.yolo26/
+video_test/
 
 # IDE & OS settings
 .vscode/

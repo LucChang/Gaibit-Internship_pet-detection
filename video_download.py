@@ -27,13 +27,22 @@ NAS_USER = "happyluc1114"
 NAS_IP = "100.103.4.107"
 NAS_PASSWORD = "Duposhiny0825"
 
-# 遠端 NAS 錄影目錄基礎路徑 (每日會建立 yyyy-mm-dd 資料夾)
-REMOTE_BASE_PATH = "/volume1/docker/mediamtx/recordings/mixcat01"
-
-# 本地儲存資料夾：video_test/{監視器名稱}
+# 本地儲存基礎資料夾
 LOCAL_BASE_DIR = "video_test"
-CCTV_NAME = "CCTV_1"
-LOCAL_PATH = os.path.join(LOCAL_BASE_DIR, CCTV_NAME)
+
+# 多監視器頻道設定 (CCTV_1 & CCTV_2)
+CCTV_CONFIGS = [
+    {
+        "name": "CCTV_1",
+        "remote_base_path": "/volume1/docker/mediamtx/recordings/mixcat01",
+        "local_path": os.path.join(LOCAL_BASE_DIR, "CCTV_1")
+    },
+    {
+        "name": "CCTV_2",
+        "remote_base_path": "/volume1/docker/mediamtx/recordings/mixcat02",
+        "local_path": os.path.join(LOCAL_BASE_DIR, "CCTV_2")
+    }
+]
 
 # 每個監視器保留的最大影片數量 (超過 3 部則自動刪除最早的影片)
 MAX_VIDEOS = 3
@@ -195,17 +204,21 @@ def cleanup_old_videos(target_dir: str, max_keep: int = 3):
         log(f"[統計] 本地目錄 [{target_dir}] 目前影片數量: {total_count}/{max_keep}，無需刪除。")
 
 
-def sync_cycle(client: NASSSHClient):
-    """每次循環的同步與下載邏輯"""
+def sync_camera(client: NASSSHClient, cfg: dict):
+    """針對單一監視器頻道的同步與下載邏輯"""
     today_str = datetime.datetime.now().strftime("%Y-%m-%d")
-    remote_dir = f"{REMOTE_BASE_PATH}/{today_str}"
+    remote_base = cfg["remote_base_path"]
+    local_path = cfg["local_path"]
+    cam_name = cfg["name"]
 
-    os.makedirs(LOCAL_PATH, exist_ok=True)
+    remote_dir = f"{remote_base}/{today_str}"
+    os.makedirs(local_path, exist_ok=True)
+
     log("--------------------------------------------------------")
-    log(f"[查詢] 檢查 NAS 當日目錄: {remote_dir}")
+    log(f"[{cam_name}] 檢查 NAS 當日目錄: {remote_dir}")
 
     if not client.ensure_connected():
-        log("[警告] 無法連線至 NAS，將於下個循環重試。")
+        log(f"[{cam_name}] 無法連線至 NAS，將於下個循環重試。")
         return
 
     # 1. 取得遠端當日目錄下檔案總數
@@ -213,9 +226,9 @@ def sync_cycle(client: NASSSHClient):
     out_count, _ = client.exec_command(count_cmd)
     if out_count is not None:
         file_count = out_count.strip()
-        log(f"[統計] 遠端目錄 [{remote_dir}] 目前共有 {file_count} 個檔案")
+        log(f"[{cam_name}] 遠端目錄 [{remote_dir}] 目前共有 {file_count} 個檔案")
     else:
-        log(f"[警告] 無法取得遠端檔案數量。")
+        log(f"[{cam_name}] 無法取得遠端檔案數量。")
         return
 
     # 2. 找出遠端最新的影片檔案 (依時間排序最後一個)
@@ -223,48 +236,59 @@ def sync_cycle(client: NASSSHClient):
     out_latest, _ = client.exec_command(latest_cmd)
     
     if not out_latest or not out_latest.strip():
-        log("[資訊] 遠端資料夾目前尚無影片檔案。")
+        log(f"[{cam_name}] 遠端資料夾目前尚無影片檔案。")
         return
 
     remote_latest_file = out_latest.strip()
     latest_filename = os.path.basename(remote_latest_file)
-    log(f"[發現] 遠端最新影片: {latest_filename}")
+    log(f"[{cam_name}] 遠端最新影片: {latest_filename}")
 
     # 3. 檢查本地是否已經存在
-    local_target_file = os.path.join(LOCAL_PATH, latest_filename)
+    local_target_file = os.path.join(local_path, latest_filename)
     need_download = True
 
     if os.path.exists(local_target_file):
-        # 取得遠端檔案大小做比對
         size_cmd = f"wc -c < '{remote_latest_file}' 2>/dev/null"
         out_size, _ = client.exec_command(size_cmd)
         if out_size and out_size.strip().isdigit():
             remote_size = int(out_size.strip())
             local_size = os.path.getsize(local_target_file)
             if local_size == remote_size and local_size > 0:
-                log(f"[略過] 最新影片 [{latest_filename}] 本地已存在且完整，無需重複下載。")
+                log(f"[{cam_name}] 最新影片 [{latest_filename}] 本地已存在且完整，無需重複下載。")
                 need_download = False
 
     if need_download:
-        log(f"[下載] 開始下載最新影片: {latest_filename} -> {LOCAL_PATH}/")
+        log(f"[{cam_name}] 開始下載最新影片: {latest_filename} -> {local_path}/")
         success = client.download_file(remote_latest_file, local_target_file)
         if success:
-            log(f"[完成] 下載完成: {latest_filename}")
+            log(f"[{cam_name}] 下載完成: {latest_filename}")
         else:
-            log(f"[失敗] 下載失敗: {latest_filename}")
+            log(f"[{cam_name}] 下載失敗: {latest_filename}")
 
     # 4. 檢查本地影片數量，超過上限 (3 部) 則自動刪除最早的
-    cleanup_old_videos(LOCAL_PATH, MAX_VIDEOS)
+    cleanup_old_videos(local_path, MAX_VIDEOS)
+
+
+def sync_cycle(client: NASSSHClient):
+    """每次循環檢查所有 CCTV 頻道"""
+    for cfg in CCTV_CONFIGS:
+        try:
+            sync_camera(client, cfg)
+        except Exception as e:
+            log(f"[{cfg['name']}] 同步過程發生異常: {e}")
 
 
 def main():
-    os.makedirs(LOCAL_PATH, exist_ok=True)
+    for cfg in CCTV_CONFIGS:
+        os.makedirs(cfg["local_path"], exist_ok=True)
+        
     log("========================================================")
-    log("監視器影片自動同步與滾動清理服務已啟動")
+    log("多頻道監視器影片自動同步與滾動清理服務已啟動")
     log(f"NAS 位置: {NAS_USER}@{NAS_IP}")
-    log(f"本地儲存: {LOCAL_PATH}")
+    for cfg in CCTV_CONFIGS:
+        log(f"  - 頻道 {cfg['name']}: {cfg['remote_base_path']} -> {cfg['local_path']}")
     log(f"同步頻率: 每 {SYNC_INTERVAL} 秒 (1 分鐘)")
-    log(f"影片上限: 最多保留最新 {MAX_VIDEOS} 部影片")
+    log(f"影片上限: 每個頻道最多保留最新 {MAX_VIDEOS} 部影片")
     log("========================================================")
 
     client = NASSSHClient(NAS_IP, NAS_USER, NAS_PASSWORD)

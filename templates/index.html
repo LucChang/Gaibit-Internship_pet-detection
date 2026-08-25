@@ -5,33 +5,45 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CCTV 物件定位 & ROI 接觸事件紀錄儀表板</title>
     <meta name="description" content="基於 YOLO26 與 StrongSORT 追蹤演算法之 CCTV 物件定位與動態 ROI 區域交集事件即時監控系統">
-    <!-- Google Fonts: Outfit & Inter -->
+    <!-- Google Fonts: Outfit (Heading & Numbers) & Inter (Body) -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
     <!-- FontAwesome Icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <!-- Custom Stylesheet -->
+    <!-- Custom Cyber-Tech Stylesheet -->
     <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
+    <!-- 科技感背景網格與流體霓虹光芒 (Ambient Atmosphere) -->
+    <div class="tech-grid-bg" aria-hidden="true"></div>
+    <div class="ambient-glow glow-cyan" aria-hidden="true"></div>
+    <div class="ambient-glow glow-purple" aria-hidden="true"></div>
+
     <div class="app-container">
         <!-- 頂部 Header 品牌與狀態列 -->
         <header class="app-header">
             <div class="header-brand">
                 <div class="brand-icon" aria-hidden="true">
-                    <i class="fa-solid fa-camera-rotate"></i>
+                    <i class="fa-solid fa-crosshairs brand-pulse"></i>
                 </div>
                 <div>
-                    <h1 class="brand-title">CCTV 物件定位 &amp; ROI 事件即時儀表板</h1>
-                    <p class="subtitle">YOLO26 Small Model &bull; StrongSORT Tracker &bull; Real-Time Spatial ROI Engine</p>
+                    <h1 class="brand-title">
+                        CCTV 物件定位 &amp; ROI 事件即時儀表板
+                        <span class="tech-tag-badge">AI SPATIAL HUD</span>
+                    </h1>
+                    <p class="subtitle">
+                        <i class="fa-solid fa-microchip"></i> YOLO26 Small Model &bull; 
+                        <i class="fa-solid fa-route"></i> StrongSORT Tracker &bull; 
+                        <i class="fa-solid fa-shapes"></i> Real-Time Spatial ROI Engine
+                    </p>
                 </div>
             </div>
             
             <div class="header-controls">
                 <div class="video-selector-group">
                     <div class="selector-field">
-                        <label for="folderSelect"><i class="fa-solid fa-video" aria-hidden="true"></i> 選擇監視器:</label>
+                        <label for="folderSelect"><i class="fa-solid fa-video" aria-hidden="true"></i> 監視器頻道:</label>
                         <select id="folderSelect" class="form-select" aria-label="選擇 CCTV 監視器頻道">
                             <option value="">載入監視器中…</option>
                         </select>
@@ -47,32 +59,44 @@
         <!-- 頂部關鍵指標統計卡片列 -->
         <section class="stats-row" aria-label="系統即時數據統計">
             <div class="stat-card stat-blue">
-                <div class="stat-icon"><i class="fa-solid fa-bell" aria-hidden="true"></i></div>
+                <div class="stat-icon-wrapper">
+                    <div class="stat-icon"><i class="fa-solid fa-bell" aria-hidden="true"></i></div>
+                </div>
                 <div class="stat-info">
                     <span class="stat-value tabular-num" id="statTotalEvents">0</span>
                     <span class="stat-label">總累積事件數</span>
                 </div>
+                <div class="stat-corner-accent"></div>
             </div>
             <div class="stat-card stat-green">
-                <div class="stat-icon"><i class="fa-solid fa-bullseye" aria-hidden="true"></i></div>
+                <div class="stat-icon-wrapper">
+                    <div class="stat-icon"><i class="fa-solid fa-bullseye" aria-hidden="true"></i></div>
+                </div>
                 <div class="stat-info">
                     <span class="stat-value tabular-num" id="statActiveContacts">0</span>
                     <span class="stat-label">當前 ROI 接觸中</span>
                 </div>
+                <div class="stat-corner-accent"></div>
             </div>
             <div class="stat-card stat-purple">
-                <div class="stat-icon"><i class="fa-solid fa-paw" aria-hidden="true"></i></div>
+                <div class="stat-icon-wrapper">
+                    <div class="stat-icon"><i class="fa-solid fa-paw" aria-hidden="true"></i></div>
+                </div>
                 <div class="stat-info">
                     <span class="stat-value tabular-num" id="statActiveObjects">0</span>
                     <span class="stat-label">畫面即時定位數</span>
                 </div>
+                <div class="stat-corner-accent"></div>
             </div>
             <div class="stat-card stat-amber">
-                <div class="stat-icon"><i class="fa-solid fa-draw-polygon" aria-hidden="true"></i></div>
+                <div class="stat-icon-wrapper">
+                    <div class="stat-icon"><i class="fa-solid fa-draw-polygon" aria-hidden="true"></i></div>
+                </div>
                 <div class="stat-info">
                     <span class="stat-value tabular-num" id="statRoiCount">0</span>
                     <span class="stat-label">運作中 ROI 數量</span>
                 </div>
+                <div class="stat-corner-accent"></div>
             </div>
         </section>
 
@@ -81,7 +105,10 @@
             <!-- 左側欄：即時串流畫面與動態 ROI 劃定畫布 -->
             <section class="card video-section" aria-labelledby="videoHeader">
                 <div class="card-header">
-                    <h2 id="videoHeader"><i class="fa-solid fa-display" aria-hidden="true"></i> 即時 CCTV 影像分析 (滑鼠拖曳拉框標記)</h2>
+                    <h2 id="videoHeader">
+                        <i class="fa-solid fa-display" aria-hidden="true"></i> 
+                        即時 CCTV 影像分析 (滑鼠拖曳拉框標記)
+                    </h2>
                     <div class="card-actions">
                         <button id="btnDrawMode" class="btn btn-outline active" aria-label="滑鼠拉框標記模式">
                             <i class="fa-solid fa-vector-square" aria-hidden="true"></i> 滑鼠劃定模式
@@ -90,9 +117,16 @@
                 </div>
 
                 <div class="video-container" id="videoWrapper">
+                    <!-- HUD Cyber Target Brackets (科技定位邊角框) -->
+                    <div class="hud-bracket top-left" aria-hidden="true"></div>
+                    <div class="hud-bracket top-right" aria-hidden="true"></div>
+                    <div class="hud-bracket bottom-left" aria-hidden="true"></div>
+                    <div class="hud-bracket bottom-right" aria-hidden="true"></div>
+                    <div class="hud-scanline" aria-hidden="true"></div>
+
                     <div class="video-overlay-badge">
                         <span class="live-indicator"><span class="live-dot"></span>LIVE STREAM</span>
-                        <span class="model-tag">YOLO26-S</span>
+                        <span class="model-tag"><i class="fa-solid fa-bolt"></i> YOLO26-S</span>
                     </div>
                     <img id="videoStream" src="/video_feed" alt="CCTV 即時影像串流">
                     <canvas id="roiCanvas" aria-label="ROI 繪製畫布"></canvas>
@@ -108,10 +142,9 @@
                         <div class="form-group">
                             <label for="inputRoiCategory">ROI 預設類別:</label>
                             <select id="inputRoiCategory" class="form-select">
-                                <option value="飲食區 Food">飲食區 Food</option>
-                                <option value="休息區 Rest">休息區 Rest</option>
-                                <option value="通道 Doorway">通道 Doorway</option>
-                                <option value="危險區 Hazard">危險區 Hazard</option>
+                                <option value="bowl">飲食碗 bowl</option>
+                                <option value="litter_box">貓砂盆 litter_box</option>
+                                <option value="cat">貓咪 cat</option>
                                 <option value="CUSTOM">自訂類別 (Custom Name)…</option>
                             </select>
                         </div>
@@ -127,14 +160,11 @@
                         </div>
                     </form>
 
-                    <div class="drawing-hint">
-                        <i class="fa-solid fa-circle-info" aria-hidden="true"></i>
-                        <span>提示：請直接在上方影片畫面上，按住滑鼠左鍵並拖曳劃定矩形框即可即時套用！</span>
-                    </div>
-
                     <!-- 已運作之 ROI 標籤清單 -->
                     <div class="active-rois-list">
-                        <h4>運作中之 ROI 區域標籤:</h4>
+                        <div class="active-rois-header">
+                            <h4>運作中之 ROI 區域標籤與 Bounding Box 尺寸編輯:</h4>
+                        </div>
                         <div id="roisContainer" class="roi-pills-wrapper">
                             <!-- JS 動態產生 -->
                         </div>
@@ -145,7 +175,10 @@
             <!-- 右側欄：即時事件日誌與過濾表格 -->
             <section class="card log-section" aria-labelledby="logHeader">
                 <div class="card-header">
-                    <h2 id="logHeader"><i class="fa-solid fa-list-check" aria-hidden="true"></i> 物件 &amp; ROI 接觸觸發事件日誌</h2>
+                    <h2 id="logHeader">
+                        <i class="fa-solid fa-list-check" aria-hidden="true"></i> 
+                        物件 &amp; ROI 接觸觸發事件日誌
+                    </h2>
                     <div class="card-actions">
                         <button id="btnClearLogs" class="btn btn-outline-danger btn-sm" aria-label="清除事件紀錄">
                             <i class="fa-solid fa-trash-can" aria-hidden="true"></i> 清除紀錄
@@ -165,8 +198,7 @@
                     <div class="filter-group">
                         <select id="selectEventFilter" class="form-select" aria-label="過濾觸發事件類型">
                             <option value="ALL">全部事件 (ALL)</option>
-                            <option value="ENTER">僅進入 (ENTER)</option>
-                            <option value="EXIT">僅離開 (EXIT)</option>
+                            <option value="CONTACT">接觸事件 (CONTACT)</option>
                         </select>
                     </div>
                 </div>
@@ -176,22 +208,41 @@
                     <table class="data-table">
                         <thead>
                             <tr>
-                                <th scope="col">時間 (Time)</th>
-                                <th scope="col">物件 ID</th>
-                                <th scope="col">接觸 ROI 類別</th>
-                                <th scope="col">觸發狀態</th>
-                                <th scope="col">停留時間</th>
+                                <th scope="col"><i class="fa-regular fa-clock"></i> 時間 (Time)</th>
+                                <th scope="col"><i class="fa-solid fa-fingerprint"></i> 物件 ID</th>
+                                <th scope="col"><i class="fa-solid fa-tag"></i> 接觸 ROI 類別</th>
+                                <th scope="col"><i class="fa-solid fa-signal"></i> 觸發狀態</th>
+                                <th scope="col"><i class="fa-solid fa-stopwatch"></i> 停留時間</th>
+                                <th scope="col"><i class="fa-solid fa-film"></i> 10s 前後片段</th>
                             </tr>
                         </thead>
                         <tbody id="eventsTableBody">
                             <tr>
-                                <td colspan="5" class="empty-msg"><i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i> 載入事件紀錄中…</td>
+                                <td colspan="6" class="empty-msg"><i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i> 載入事件紀錄中…</td>
                             </tr>
                         </tbody>
                     </table>
                 </div>
             </section>
         </main>
+    </div>
+
+    <!-- 影片片段線上預覽燈箱 Modal -->
+    <div id="videoModal" class="modal-overlay" style="display: none;" aria-hidden="true">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3><i class="fa-solid fa-film"></i> 事件前後 10 秒影片片段預覽</h3>
+                <button id="btnCloseModal" class="btn-close" aria-label="關閉預覽">&times;</button>
+            </div>
+            <div class="modal-body">
+                <video id="modalVideoPlayer" controls autoplay style="width: 100%; border-radius: 10px; max-height: 65vh; background: #000; display: block;"></video>
+            </div>
+            <div class="modal-footer">
+                <a id="modalDownloadBtn" href="#" download class="btn btn-success" aria-label="下載影片片段">
+                    <i class="fa-solid fa-download"></i> 下載片段檔案 (.mp4)
+                </a>
+            </div>
+        </div>
     </div>
 
     <!-- Main JavaScript Logic -->

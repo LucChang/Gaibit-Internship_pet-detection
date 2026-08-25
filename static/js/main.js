@@ -78,6 +78,8 @@ document.addEventListener('DOMContentLoaded', () => {
     if (btnClearLogs) btnClearLogs.addEventListener('click', clearLogs);
 });
 
+
+
 // 調整 Canvas 解析度與顯示比例
 function resizeCanvas() {
     if (videoWrapper && canvas) {
@@ -240,7 +242,7 @@ async function deleteRoi(roiId) {
     statRoiCount.textContent = activeRois.length;
 }
 
-// 渲染已劃定 ROI 標籤清單
+// 渲染已劃定 ROI 標籤清單與 Bounding Box 尺寸編輯面板
 function renderRoiPills() {
     if (!roisContainer) return;
     roisContainer.innerHTML = '';
@@ -250,16 +252,60 @@ function renderRoiPills() {
     }
 
     activeRois.forEach(roi => {
-        const pill = document.createElement('div');
-        pill.className = 'roi-pill';
-        pill.innerHTML = `
-            <span class="roi-pill-color" style="background-color: ${roi.color}; color: ${roi.color};"></span>
-            <span><strong>${roi.category}</strong></span>
-            <button class="roi-pill-delete" aria-label="刪除 ${roi.category} ROI" title="刪除 ROI"><i class="fa-solid fa-xmark" aria-hidden="true"></i></button>
+        const card = document.createElement('div');
+        card.className = 'roi-edit-card';
+        card.innerHTML = `
+            <div class="roi-card-header">
+                <div class="roi-card-title">
+                    <span class="roi-pill-color" style="background-color: ${roi.color}; color: ${roi.color};"></span>
+                    <strong>${roi.category}</strong>
+                </div>
+                <button class="roi-pill-delete" aria-label="刪除 ${roi.category} ROI" title="刪除 ROI">
+                    <i class="fa-solid fa-trash-can" aria-hidden="true"></i>
+                </button>
+            </div>
+            <div class="roi-dim-controls">
+                <div class="dim-field" title="縮放矩形框寬度 (Width)">
+                    <span class="dim-label">寬 (W):</span>
+                    <input type="number" step="0.01" min="0.01" max="1" class="dim-input input-w" value="${roi.w}">
+                </div>
+                <div class="dim-field" title="縮放矩形框高度 (Height)">
+                    <span class="dim-label">高 (H):</span>
+                    <input type="number" step="0.01" min="0.01" max="1" class="dim-input input-h" value="${roi.h}">
+                </div>
+                <div class="dim-field" title="移動矩形框 X 軸座標">
+                    <span class="dim-label">X 軸:</span>
+                    <input type="number" step="0.01" min="0" max="1" class="dim-input input-x" value="${roi.x}">
+                </div>
+                <div class="dim-field" title="移動矩形框 Y 軸座標">
+                    <span class="dim-label">Y 軸:</span>
+                    <input type="number" step="0.01" min="0" max="1" class="dim-input input-y" value="${roi.y}">
+                </div>
+            </div>
         `;
 
-        pill.querySelector('.roi-pill-delete').addEventListener('click', () => deleteRoi(roi.id));
-        roisContainer.appendChild(pill);
+        const inputW = card.querySelector('.input-w');
+        const inputH = card.querySelector('.input-h');
+        const inputX = card.querySelector('.input-x');
+        const inputY = card.querySelector('.input-y');
+
+        const handleDimChange = () => {
+            roi.w = Math.max(0.01, Math.min(1, parseFloat(inputW.value) || 0.1));
+            roi.h = Math.max(0.01, Math.min(1, parseFloat(inputH.value) || 0.1));
+            roi.x = Math.max(0, Math.min(1, parseFloat(inputX.value) || 0));
+            roi.y = Math.max(0, Math.min(1, parseFloat(inputY.value) || 0));
+
+            saveRoisBackend();
+            redrawCanvas();
+        };
+
+        inputW.addEventListener('input', handleDimChange);
+        inputH.addEventListener('input', handleDimChange);
+        inputX.addEventListener('input', handleDimChange);
+        inputY.addEventListener('input', handleDimChange);
+
+        card.querySelector('.roi-pill-delete').addEventListener('click', () => deleteRoi(roi.id));
+        roisContainer.appendChild(card);
     });
 }
 
@@ -297,6 +343,7 @@ async function selectCameraFolder(folder) {
         const data = await res.json();
         if (data.status === 'success') {
             videoStream.src = '/video_feed?' + Date.now();
+            fetchRois();
         }
     } catch (err) {
         console.error('Select Camera Error:', err);
@@ -372,15 +419,24 @@ function renderEventsTable() {
     eventsTableBody.innerHTML = '';
 
     if (filtered.length === 0) {
-        eventsTableBody.innerHTML = '<tr><td colspan="5" class="empty-msg"><i class="fa-solid fa-folder-open" aria-hidden="true"></i> 尚無符合條件的觸發事件紀錄</td></tr>';
+        eventsTableBody.innerHTML = '<tr><td colspan="6" class="empty-msg"><i class="fa-solid fa-folder-open" aria-hidden="true"></i> 尚無符合條件的觸發事件紀錄</td></tr>';
         return;
     }
 
     filtered.forEach(evt => {
         const tr = document.createElement('tr');
 
-        const badgeClass = evt.event_type === 'ENTER' ? 'badge-enter' : 'badge-exit';
-        const badgeLabel = evt.event_type === 'ENTER' ? 'ENTER 進入' : 'EXIT 離開';
+        const badgeClass = 'badge-contact';
+        const badgeLabel = 'CONTACT 接觸';
+
+        let clipHtml = '<span class="text-muted" style="font-size: 0.82rem;">-</span>';
+        if (evt.clip_url) {
+            clipHtml = `<button class="btn-clip" data-url="${evt.clip_url}" title="播放/下載接觸前後 10 秒影片片段">
+                <i class="fa-solid fa-film"></i> 觀看 20s 片段
+            </button>`;
+        } else if (evt.duration_sec >= 1.0) {
+            clipHtml = `<span class="text-muted" style="font-size: 0.82rem;"><i class="fa-solid fa-spinner fa-spin"></i> 剪輯中…</span>`;
+        }
 
         tr.innerHTML = `
             <td><strong class="tabular-num">${evt.time_str}</strong></td>
@@ -388,8 +444,50 @@ function renderEventsTable() {
             <td><strong>${evt.roi_category}</strong></td>
             <td><span class="badge ${badgeClass}">${badgeLabel}</span></td>
             <td class="tabular-num">${evt.duration_sec > 0 ? evt.duration_sec + ' 秒' : '-'}</td>
+            <td>${clipHtml}</td>
         `;
+
+        const clipBtn = tr.querySelector('.btn-clip');
+        if (clipBtn) {
+            clipBtn.addEventListener('click', () => {
+                const url = clipBtn.getAttribute('data-url');
+                openVideoModal(url);
+            });
+        }
 
         eventsTableBody.appendChild(tr);
     });
 }
+
+// 影片 Modal 彈窗操控功能
+const videoModal = document.getElementById('videoModal');
+const modalVideoPlayer = document.getElementById('modalVideoPlayer');
+const modalDownloadBtn = document.getElementById('modalDownloadBtn');
+const btnCloseModal = document.getElementById('btnCloseModal');
+
+function openVideoModal(url) {
+    if (!videoModal || !modalVideoPlayer) return;
+    modalVideoPlayer.src = url;
+    if (modalDownloadBtn) modalDownloadBtn.href = url;
+    videoModal.style.display = 'flex';
+    videoModal.setAttribute('aria-hidden', 'false');
+}
+
+function closeVideoModal() {
+    if (!videoModal || !modalVideoPlayer) return;
+    modalVideoPlayer.pause();
+    modalVideoPlayer.src = '';
+    videoModal.style.display = 'none';
+    videoModal.setAttribute('aria-hidden', 'true');
+}
+
+if (btnCloseModal) {
+    btnCloseModal.addEventListener('click', closeVideoModal);
+}
+
+if (videoModal) {
+    videoModal.addEventListener('click', (e) => {
+        if (e.target === videoModal) closeVideoModal();
+    });
+}
+
