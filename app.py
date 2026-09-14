@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 from flask import Flask, Response, jsonify, render_template, request, send_file
 from ultralytics import YOLO
+from florence2_facility_detector import Florence2FacilityDetector, log_facility_contact
 
 app = Flask(__name__)
 
@@ -34,6 +35,7 @@ def find_default_video():
 current_video_path = find_default_video()
 model = None
 model_path = None
+global_facility_detector = None
 
 # ROI 列表記憶與持久化機制 (分監視器/資料夾儲存於 roi_config.json)
 ROI_CONFIG_FILE = "roi_config.json"
@@ -263,14 +265,13 @@ def hex_to_bgr(hex_color):
 def find_best_pt_model():
     """自動搜尋最優模型檔 best.pt"""
     candidates = [
-        # os.path.join("runs", "detect", "runs", "detect", "colab_yolo_p2_highres-2", "weights", "best.pt")
-        # os.path.join("runs", "detect", "runs", "detect", "colab_yolo_p2_highres", "weights", "best.pt"),
+        os.path.join("runs", "detect", "runs", "detect", "train_yolo26_small-2", "weights", "best.pt"),
         os.path.join("runs", "detect", "runs", "detect", "train_yolo26_small-3", "weights", "best.pt"),
-        # os.path.join("runs", "detect", "runs", "detect", "train_yolo26_small-2", "weights", "best.pt"),
-        # os.path.join("runs", "detect", "runs", "detect", "train_yolo11", "weights", "best.pt"),
-        # os.path.join("runs", "detect", "train_yolo11", "weights", "best.pt"),
-        # os.path.join("runs", "detect", "train_yolo26n_pet_boxes", "weights", "best.pt"),
-        # "best.pt"
+        os.path.join("runs", "detect", "runs", "detect", "colab_yolo_p2_highres-2", "weights", "best.pt"),
+        os.path.join("runs", "detect", "runs", "detect", "colab_yolo_p2_highres", "weights", "best.pt"),
+        os.path.join("runs", "detect", "runs", "detect", "train_yolo11", "weights", "best.pt"),
+        os.path.join("runs", "detect", "train_yolo26n_pet_boxes", "weights", "best.pt"),
+        "yolo26n.pt"
     ]
     for path in candidates:
         if os.path.exists(path):
@@ -372,6 +373,12 @@ def generate_video_stream():
     tracker_config = "strongsort_tuned.yaml" if os.path.exists("strongsort_tuned.yaml") else ("botsort.yaml" if os.path.exists("botsort.yaml") else "bytetrack.yaml")
     id_smoother = TrackIDSmoother(max_dist=100.0)
 
+    # 初始化 Florence-2 靜態設施偵測器 (每 60 秒 / 每分鐘透過 Florence-2-large 偵測)
+    global global_facility_detector
+    if global_facility_detector is None:
+        global_facility_detector = Florence2FacilityDetector(model_id="microsoft/Florence-2-large", interval_sec=60.0)
+    facility_detector = global_facility_detector
+
     frame_count = 0
     prev_time = time.time()
     
@@ -395,6 +402,7 @@ def generate_video_stream():
             cap.release()
             current_video_path = next_video
             load_roi_config()
+            facility_detector.reset()
             cap = cv2.VideoCapture(current_video_path)
             if not cap.isOpened():
                 print(f"[警告] 無法自動切換至下一支影片: {next_video}")
@@ -416,7 +424,7 @@ def generate_video_stream():
         calc_fps = 1.0 / (now_time - prev_time) if (now_time - prev_time) > 0 else 30.0
         prev_time = now_time
 
-        # 透過 StrongSORT (BoT-SORT backend) 進行追蹤
+        # 透過 StrongSORT (BoT-SORT backend) 進行動態動物 (Cat/Dog) 高頻即時追蹤
         results = model.track(
             source=frame,
             conf=0.25,
@@ -440,10 +448,8 @@ def generate_video_stream():
                 cls_name = model.names.get(cls_id, str(cls_id)) if hasattr(model, 'names') else str(cls_id)
                 cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
 
-
-
                 raw_id = int(box.id[0]) if box.id is not None else None
-                if cls_name not in ['bowl', 'litter_box']:
+                if cls_name not in ['bowl', 'food_bowl', 'litter_box']:
                     if raw_id is None:
                         raw_id = 99000 + (cls_id * 1000) + (cx % 1000)
                     stable_id = id_smoother.update(raw_id, cx, cy, cls_id, frame_count)
@@ -464,6 +470,17 @@ def generate_video_stream():
         id_smoother.post_frame_update(frame_count, active_stable_ids, current_positions)
 
         # -------------------------------------------------------------
+        # 靜態設施 Florence-2 低頻率 (每 5 秒) 偵測 litter_box 與 bowl
+        # -------------------------------------------------------------
+        facility_detector.update_facilities(frame, video_time_sec)
+        florence_facilities = facility_detector.get_facility_detections()
+
+        if florence_facilities:
+            # 移除粗略偵測設施，採用 Florence-2 精確定位框
+            detected_objects = [obj for obj in detected_objects if obj['cls_name'] not in ['bowl', 'food_bowl', 'litter_box']]
+            detected_objects.extend(florence_facilities)
+
+        # -------------------------------------------------------------
         # ROI 交集計算
         # -------------------------------------------------------------
         current_frame_contacts = set()
@@ -477,35 +494,54 @@ def generate_video_stream():
         # -------------------------------------------------------------
         targets = []
         roi_cat_set = set()
-        
-        with data_lock:
-            current_rois = list(rois)
 
         for r in current_rois:
             targets.append({
                 'id': r['id'],
                 'category': r['category'],
+                'box_name': r['category'],
                 'color': r['color'],
                 'x1': int(r['x'] * w_frame),
                 'y1': int(r['y'] * h_frame),
                 'x2': int((r['x'] + r['w']) * w_frame),
                 'y2': int((r['y'] + r['h']) * h_frame),
-                'is_roi': True
+                'is_roi': True,
+                'is_florence': False
             })
             roi_cat_set.add(r['category'])
 
-        for obj in detected_objects:
-            if obj['cls_name'] in ['bowl', 'litter_box'] and obj['cls_name'] not in roi_cat_set:
-                targets.append({
-                    'id': f"det_{obj['cls_name']}",
-                    'category': obj['cls_name'],
-                    'color': "#FF5722" if obj['cls_name'] == 'bowl' else "#29B6F6",
-                    'x1': obj['x1'],
-                    'y1': obj['y1'],
-                    'x2': obj['x2'],
-                    'y2': obj['y2'],
-                    'is_roi': False
-                })
+        # 加入 Florence-2 偵測到的設施標記框
+        for idx, f_obj in enumerate(florence_facilities):
+            b_name = f_obj.get('box_name') or f_obj.get('cls_name', 'facility')
+            targets.append({
+                'id': f"florence_{idx}_{b_name}",
+                'category': f_obj.get('cls_name', b_name),
+                'box_name': b_name,
+                'color': "#00E676" if "litter" in b_name else "#29B6F6",
+                'x1': f_obj['x1'],
+                'y1': f_obj['y1'],
+                'x2': f_obj['x2'],
+                'y2': f_obj['y2'],
+                'is_roi': False,
+                'is_florence': True
+            })
+
+        # 若 Florence-2 尚未就緒且無標記框，才使用 YOLO 備用粗略設施
+        if not florence_facilities:
+            for obj in detected_objects:
+                if obj['cls_name'] in ['bowl', 'litter_box'] and obj['cls_name'] not in roi_cat_set:
+                    targets.append({
+                        'id': f"det_{obj['cls_name']}",
+                        'category': obj['cls_name'],
+                        'box_name': obj['cls_name'],
+                        'color': "#FF5722" if obj['cls_name'] == 'bowl' else "#29B6F6",
+                        'x1': obj['x1'],
+                        'y1': obj['y1'],
+                        'x2': obj['x2'],
+                        'y2': obj['y2'],
+                        'is_roi': False,
+                        'is_florence': False
+                    })
 
         current_frame_contacts = set()
         active_target_hits = {}
@@ -550,7 +586,10 @@ def generate_video_stream():
                             'object_id': obj['stable_id'],
                             'target_id': target['id'],
                             'roi_category': target['category'],
-                            'event_logged': False
+                            'box_name': target.get('box_name', target['category']),
+                            'is_florence': target.get('is_florence', False),
+                            'event_logged': False,
+                            'logged_5s': False
                         }
                     else:
                         active_contacts[contact_key]['last_seen_frame'] = frame_count
@@ -562,7 +601,37 @@ def generate_video_stream():
                         'is_valid': dur_sec >= 1.0
                     }
 
-                    # 接觸時立即記錄單一 CONTACT 事件
+                    # 貓咪接觸 Florence-2 設施標記框超過 5 秒：透過 log 紀錄狀態 (包含貓咪 id 與 bounding box 名稱)
+                    if active_contacts[contact_key].get('is_florence') and dur_sec >= 5.0:
+                        if not active_contacts[contact_key].get('logged_5s'):
+                            active_contacts[contact_key]['logged_5s'] = True
+                            c_id = obj['stable_id']
+                            b_name = active_contacts[contact_key].get('box_name', target['category'])
+                            v_name = os.path.basename(current_video_path)
+                            log_facility_contact(
+                                cat_id=c_id,
+                                box_name=b_name,
+                                duration_sec=dur_sec,
+                                time_str=time_str,
+                                video_name=v_name,
+                                status="接觸超過 5 秒"
+                            )
+                            # 同步記錄至 Web 系統 event_logs 以便介面與 CSV 檢視
+                            with data_lock:
+                                event_logs.append({
+                                    'id': next_event_id,
+                                    'time_str': time_str,
+                                    'timestamp_sec': round(video_time_sec, 1),
+                                    'frame_idx': frame_count,
+                                    'object_id': f"#{c_id}",
+                                    'roi_category': f"[Florence-2] {b_name}",
+                                    'event_type': 'STAY_5S',
+                                    'duration_sec': dur_sec,
+                                    'clip_url': ''
+                                })
+                                next_event_id += 1
+
+                    # 接觸時立即記錄單一 CONTACT 事件 (針對一般 ROI 或初始接觸)
                     if not active_contacts[contact_key]['event_logged']:
                         active_contacts[contact_key]['event_logged'] = True
                         contact_evt_id = next_event_id
@@ -591,11 +660,12 @@ def generate_video_stream():
                         )
                     else:
                         # 動態更新持續接觸秒數
-                        evt_id = active_contacts[contact_key]['event_id']
-                        with data_lock:
-                            for evt in event_logs:
-                                if evt.get('id') == evt_id:
-                                    evt['duration_sec'] = dur_sec
+                        evt_id = active_contacts[contact_key].get('event_id')
+                        if evt_id is not None:
+                            with data_lock:
+                                for evt in event_logs:
+                                    if evt.get('id') == evt_id:
+                                        evt['duration_sec'] = dur_sec
 
         # 接觸結束清理與生成最終完整片段 (無 EXIT 事件)
         for c_key in list(active_contacts.keys()):
@@ -603,12 +673,23 @@ def generate_video_stream():
                 info = active_contacts[c_key]
                 if (frame_count - info['last_seen_frame']) > 10:
                     dur_sec = round((info['last_seen_frame'] - info['start_frame']) / fps_src, 1)
+                    # 若曾觸發超過 5 秒的 Florence-2 設施接觸，紀錄離開時的最終總停留時間
+                    if info.get('is_florence') and info.get('logged_5s'):
+                        log_facility_contact(
+                            cat_id=info['object_id'],
+                            box_name=info.get('box_name', info['roi_category']),
+                            duration_sec=dur_sec,
+                            time_str=format_timestamp(info['last_seen_frame'] / fps_src),
+                            video_name=os.path.basename(current_video_path),
+                            status=f"結束接觸 (總停留 {dur_sec} 秒)"
+                        )
                     if info['event_logged']:
-                        evt_id = info['event_id']
-                        with data_lock:
-                            for evt in event_logs:
-                                if evt.get('id') == evt_id:
-                                    evt['duration_sec'] = max(0.1, dur_sec)
+                        evt_id = info.get('event_id')
+                        if evt_id is not None:
+                            with data_lock:
+                                for evt in event_logs:
+                                    if evt.get('id') == evt_id:
+                                        evt['duration_sec'] = max(0.1, dur_sec)
 
                         # 背景非同步觸發剪輯該接觸事件 (進入前 10s 至 離開後 10s) 完整影片片段
                         end_sec = info['last_seen_frame'] / fps_src
@@ -616,7 +697,7 @@ def generate_video_stream():
                             video_path=current_video_path,
                             start_sec=info['start_sec'],
                             end_sec=end_sec,
-                            event_ids=[evt_id],
+                            event_ids=[evt_id] if evt_id else [],
                             object_id=info['object_id'],
                             category=info['roi_category']
                         )
@@ -635,7 +716,13 @@ def generate_video_stream():
             thickness = 3 if is_hit else 2
             cv2.rectangle(frame, (tx1, ty1), (tx2, ty2), color_bgr, thickness)
 
-            badge_text = f"ROI: {target['category']}" if target['is_roi'] else f"Target: {target['category']}"
+            if target.get('is_florence'):
+                badge_text = f"[Florence-2] {target.get('box_name', target['category'])}"
+            elif target.get('is_roi'):
+                badge_text = f"ROI: {target['category']}"
+            else:
+                badge_text = f"Target: {target['category']}"
+
             if is_hit:
                 badge_text += f" [CONTACT! {hit_info['duration_sec']}s]"
 
@@ -644,17 +731,16 @@ def generate_video_stream():
             cv2.putText(frame, badge_text, (tx1 + 5, max(12, ty1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1, cv2.LINE_AA)
 
         for obj in detected_objects:
+            # 設施框已經在 targets 中繪製並標記 CONTACT 狀態，此處僅繪製貓咪與其他動態追蹤目標
+            if obj['cls_name'] in ['bowl', 'food_bowl', 'litter_box'] or obj.get('is_florence'):
+                continue
             ox1, oy1, ox2, oy2 = obj['x1'], obj['y1'], obj['x2'], obj['y2']
             stable_id = obj['stable_id']
             conf = obj['conf']
             cls_name = obj['cls_name']
 
-            if cls_name in ['bowl', 'litter_box']:
-                obj_color = hex_to_bgr("#FF5722") if cls_name == 'bowl' else hex_to_bgr("#29B6F6")
-                label = f"{cls_name} ({conf:.2f})"
-            else:
-                obj_color = hex_to_bgr(COLOR_HEX_LIST[stable_id % len(COLOR_HEX_LIST)]) if stable_id else (0, 255, 0)
-                label = f"#{stable_id} ({conf:.2f})" if stable_id else f"{cls_name} ({conf:.2f})"
+            obj_color = hex_to_bgr(COLOR_HEX_LIST[stable_id % len(COLOR_HEX_LIST)]) if stable_id else (0, 255, 0)
+            label = f"#{stable_id} {cls_name} ({conf:.2f})" if stable_id else f"{cls_name} ({conf:.2f})"
 
             cv2.rectangle(frame, (ox1, oy1), (ox2, oy2), obj_color, 2)
 
