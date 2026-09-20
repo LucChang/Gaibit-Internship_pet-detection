@@ -16,6 +16,13 @@ from flask import Flask, Response, jsonify, render_template, request, send_file
 from ultralytics import YOLO
 from florence2_facility_detector import Florence2FacilityDetector, log_facility_contact
 
+try:
+    # pyrefly: ignore [missing-import]
+    from dotenv import load_dotenv
+    load_dotenv(override=True)
+except ImportError:
+    pass
+
 app = Flask(__name__)
 
 # 全域與執行序安全機制
@@ -37,7 +44,6 @@ model = None
 model_path = None
 global_facility_detector = None
 
-# ROI 列表記憶與持久化機制 (分監視器/資料夾儲存於 roi_config.json)
 ROI_CONFIG_FILE = "roi_config.json"
 
 def get_camera_key(video_path=None):
@@ -373,10 +379,10 @@ def generate_video_stream():
     tracker_config = "strongsort_tuned.yaml" if os.path.exists("strongsort_tuned.yaml") else ("botsort.yaml" if os.path.exists("botsort.yaml") else "bytetrack.yaml")
     id_smoother = TrackIDSmoother(max_dist=100.0)
 
-    # 初始化 Florence-2 靜態設施偵測器 (每 60 秒 / 每分鐘透過 Florence-2-large 偵測)
+    # 初始化 Florence-2 靜態設施偵測器 (每 5 秒透過 Florence-2-large 偵測)
     global global_facility_detector
     if global_facility_detector is None:
-        global_facility_detector = Florence2FacilityDetector(model_id="microsoft/Florence-2-large", interval_sec=60.0)
+        global_facility_detector = Florence2FacilityDetector(model_id="microsoft/Florence-2-large", interval_sec=5.0)
     facility_detector = global_facility_detector
 
     frame_count = 0
@@ -589,7 +595,7 @@ def generate_video_stream():
                             'box_name': target.get('box_name', target['category']),
                             'is_florence': target.get('is_florence', False),
                             'event_logged': False,
-                            'logged_5s': False
+                            'event_id': None
                         }
                     else:
                         active_contacts[contact_key]['last_seen_frame'] = frame_count
@@ -598,98 +604,77 @@ def generate_video_stream():
                     active_target_hits[target['id']] = {
                         'iou': round(max(iou * 100, cat_coverage * 100), 1),
                         'duration_sec': dur_sec,
-                        'is_valid': dur_sec >= 1.0
+                        'is_valid': dur_sec >= 3.0
                     }
 
-                    # 貓咪接觸 Florence-2 設施標記框超過 5 秒：透過 log 紀錄狀態 (包含貓咪 id 與 bounding box 名稱)
-                    if active_contacts[contact_key].get('is_florence') and dur_sec >= 5.0:
-                        if not active_contacts[contact_key].get('logged_5s'):
-                            active_contacts[contact_key]['logged_5s'] = True
+                    # 停留時間超過 3 秒才會紀錄，排除持續停留同一 bounding box 內的重複紀錄
+                    if dur_sec >= 3.0:
+                        if not active_contacts[contact_key]['event_logged']:
+                            active_contacts[contact_key]['event_logged'] = True
+                            contact_evt_id = next_event_id
+                            active_contacts[contact_key]['event_id'] = contact_evt_id
+                            next_event_id += 1
+
                             c_id = obj['stable_id']
                             b_name = active_contacts[contact_key].get('box_name', target['category'])
-                            v_name = os.path.basename(current_video_path)
-                            log_facility_contact(
-                                cat_id=c_id,
-                                box_name=b_name,
-                                duration_sec=dur_sec,
-                                time_str=time_str,
-                                video_name=v_name,
-                                status="接觸超過 5 秒"
-                            )
-                            # 同步記錄至 Web 系統 event_logs 以便介面與 CSV 檢視
+                            is_florence = active_contacts[contact_key].get('is_florence', False)
+                            category_label = f"[Florence-2] {b_name}" if is_florence else target['category']
+
                             with data_lock:
                                 event_logs.append({
-                                    'id': next_event_id,
-                                    'time_str': time_str,
-                                    'timestamp_sec': round(video_time_sec, 1),
-                                    'frame_idx': frame_count,
+                                    'id': contact_evt_id,
+                                    'time_str': format_timestamp(active_contacts[contact_key]['start_sec']),
+                                    'timestamp_sec': round(active_contacts[contact_key]['start_sec'], 1),
+                                    'frame_idx': active_contacts[contact_key]['start_frame'],
                                     'object_id': f"#{c_id}",
-                                    'roi_category': f"[Florence-2] {b_name}",
-                                    'event_type': 'STAY_5S',
+                                    'roi_category': category_label,
+                                    'event_type': 'CONTACT',
                                     'duration_sec': dur_sec,
                                     'clip_url': ''
                                 })
-                                next_event_id += 1
 
-                    # 接觸時立即記錄單一 CONTACT 事件 (針對一般 ROI 或初始接觸)
-                    if not active_contacts[contact_key]['event_logged']:
-                        active_contacts[contact_key]['event_logged'] = True
-                        contact_evt_id = next_event_id
-                        active_contacts[contact_key]['event_id'] = contact_evt_id
-                        with data_lock:
-                            event_logs.append({
-                                'id': contact_evt_id,
-                                'time_str': time_str,
-                                'timestamp_sec': round(video_time_sec, 1),
-                                'frame_idx': frame_count,
-                                'object_id': f"#{obj['stable_id']}",
-                                'roi_category': target['category'],
-                                'event_type': 'CONTACT',
-                                'duration_sec': dur_sec
-                            })
-                            next_event_id += 1
+                            if is_florence:
+                                v_name = os.path.basename(current_video_path)
+                                log_facility_contact(
+                                    cat_id=c_id,
+                                    box_name=b_name,
+                                    duration_sec=dur_sec,
+                                    time_str=time_str,
+                                    video_name=v_name,
+                                    status="停留超過 3 秒"
+                                )
+                        else:
+                            # 貓咪持續在同一個 bounding box 裡面：排除重複紀錄，僅動態更新現有事件之持續時間
+                            evt_id = active_contacts[contact_key].get('event_id')
+                            if evt_id is not None:
+                                with data_lock:
+                                    for evt in event_logs:
+                                        if evt.get('id') == evt_id:
+                                            evt['duration_sec'] = dur_sec
 
-                        # 當下即觸發非同步剪輯 CONTACT 前後 10 秒影片片段
-                        generate_clip_async(
-                            video_path=current_video_path,
-                            start_sec=active_contacts[contact_key]['start_sec'],
-                            end_sec=video_time_sec,
-                            event_ids=[contact_evt_id],
-                            object_id=obj['stable_id'],
-                            category=target['category']
-                        )
-                    else:
-                        # 動態更新持續接觸秒數
-                        evt_id = active_contacts[contact_key].get('event_id')
-                        if evt_id is not None:
-                            with data_lock:
-                                for evt in event_logs:
-                                    if evt.get('id') == evt_id:
-                                        evt['duration_sec'] = dur_sec
-
-        # 接觸結束清理與生成最終完整片段 (無 EXIT 事件)
+        # 接觸結束清理與生成完整片段 (停留 < 3 秒則不紀錄，超過 3 秒則在離開後剪輯完整片段)
         for c_key in list(active_contacts.keys()):
             if c_key not in current_frame_contacts:
                 info = active_contacts[c_key]
                 if (frame_count - info['last_seen_frame']) > 10:
                     dur_sec = round((info['last_seen_frame'] - info['start_frame']) / fps_src, 1)
-                    # 若曾觸發超過 5 秒的 Florence-2 設施接觸，紀錄離開時的最終總停留時間
-                    if info.get('is_florence') and info.get('logged_5s'):
-                        log_facility_contact(
-                            cat_id=info['object_id'],
-                            box_name=info.get('box_name', info['roi_category']),
-                            duration_sec=dur_sec,
-                            time_str=format_timestamp(info['last_seen_frame'] / fps_src),
-                            video_name=os.path.basename(current_video_path),
-                            status=f"結束接觸 (總停留 {dur_sec} 秒)"
-                        )
-                    if info['event_logged']:
+                    if info.get('event_logged'):
                         evt_id = info.get('event_id')
                         if evt_id is not None:
                             with data_lock:
                                 for evt in event_logs:
                                     if evt.get('id') == evt_id:
-                                        evt['duration_sec'] = max(0.1, dur_sec)
+                                        evt['duration_sec'] = max(3.0, dur_sec)
+
+                        if info.get('is_florence'):
+                            log_facility_contact(
+                                cat_id=info['object_id'],
+                                box_name=info.get('box_name', info['roi_category']),
+                                duration_sec=dur_sec,
+                                time_str=format_timestamp(info['last_seen_frame'] / fps_src),
+                                video_name=os.path.basename(current_video_path),
+                                status=f"結束停留 (總停留 {dur_sec} 秒)"
+                            )
 
                         # 背景非同步觸發剪輯該接觸事件 (進入前 10s 至 離開後 10s) 完整影片片段
                         end_sec = info['last_seen_frame'] / fps_src

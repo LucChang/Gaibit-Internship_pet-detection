@@ -1,20 +1,55 @@
-# Python cache and bytecode
+# =========================================================
+# 1. Python 編譯與執行快取 (Python Bytecode & Cache)
+# =========================================================
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
+*.pyd
+*.pyo
+.pytest_cache/
+.coverage
+htmlcov/
 
-# Environments
+# =========================================================
+# 2. 環境變數與敏感資訊 (Environments & Secrets)
+# =========================================================
+.env
+.env.*
+.env.local
+!.env.example
 .venv/
 venv/
 env/
 ENV/
 
-# Log files
+# =========================================================
+# 3. 系統即時日誌檔案 (Runtime Logs)
+# =========================================================
 *.log
 video_download.log
+florence2_contact.log
+*.log.*
+npm-debug.log*
 
-# Model weights & Checkpoints
+# =========================================================
+# 4. app.py 執行產生之輸出、剪輯影片與暫存檔 (App Outputs & Clips)
+# =========================================================
+static/clips/
+video_test/
+video_test_output/
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.ts
+*.flv
+cctv_roi_events.csv
+roi_config.json
+
+# =========================================================
+# 5. 模型權重檔與 Hugging Face 快取 (Model Weights & Cache)
+# =========================================================
 *.pt
 *.pth
 *.onnx
@@ -22,31 +57,55 @@ video_download.log
 *.weights
 *.tflite
 *.h5
+*.bin
+*.safetensors
+weights/
+yolo26n.pt
+checkpoints/
+.cache/
+huggingface/
+hf_home/
 
-# Large Archives & Compression
+# =========================================================
+# 6. YOLO 訓練、評估與實驗紀錄 (Training & Experiment Tracking)
+# =========================================================
+runs/
+wandb/
+Cat and Dog cctv.yolo26/
+
+# =========================================================
+# 7. 測試腳本、資料增強與除錯暫存檔 (Testing & Scratch Files)
+# =========================================================
+test_*.py
+test_florence2.py
+evaluate_and_tune.py
+copy_paste_augment.py
+train_on_colab.ipynb
+scratch/
+tmp/
+temp/
+*.tmp
+*.temp
+
+# =========================================================
+# 8. 大型壓縮與封裝檔案 (Large Archives)
+# =========================================================
 *.zip
 *.tar
 *.gz
 *.7z
+*.rar
 project_colab.zip
 
-# YOLO output & experiment tracking
-runs/
-wandb/
-
-# Generated clips & temporary media
-static/clips/
-*.mp4
-*.avi
-*.mov
-*.mkv
-
-# Datasets and Test Video data
-Cat and Dog cctv.yolo26/
-video_test/
-
-# IDE & OS settings
+# =========================================================
+# 9. 編輯器與作業系統暫存檔 (IDE & OS Specific)
+# =========================================================
 .vscode/
 .idea/
+*.sublime-project
+*.sublime-workspace
+.ipynb_checkpoints/
 .DS_Store
 Thumbs.db
+desktop.ini
+ehthumbs.db

@@ -22,36 +22,76 @@ if hasattr(sys.stdout, "reconfigure"):
     except Exception:
         pass
 
-# ================= 設定區 =================
-NAS_USER = "happyluc1114"
-NAS_IP = "100.103.4.107"
-NAS_PASSWORD = "Duposhiny0825"
+# 載入 .env 環境變數設定檔
+def _load_env():
+    """優先使用 python-dotenv 載入 .env，若未安裝則使用簡易解析器"""
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(override=True)
+    except ImportError:
+        env_path = os.path.join(os.path.dirname(__file__), ".env")
+        if os.path.exists(env_path):
+            with open(env_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip().strip("'\"")
+                    if k not in os.environ:
+                        os.environ[k] = v
+
+_load_env()
+
+# ================= 設定區 (從 .env 讀取) =================
+NAS_USER = os.getenv("NAS_USER", "happyluc1114")
+NAS_IP = os.getenv("NAS_IP", os.getenv("NAS_HOST", "100.103.4.107"))
+NAS_PORT = int(os.getenv("NAS_PORT", "22"))
+NAS_PASSWORD = os.getenv("NAS_PASSWORD", "Duposhiny0825")
 
 # 本地儲存基礎資料夾
-LOCAL_BASE_DIR = "video_test"
+LOCAL_BASE_DIR = os.getenv("LOCAL_BASE_DIR", "video_test")
 
-# 多監視器頻道設定 (CCTV_1 & CCTV_2)
-CCTV_CONFIGS = [
-    {
-        "name": "CCTV_1",
-        "remote_base_path": "/volume1/docker/mediamtx/recordings/mixcat01",
-        "local_path": os.path.join(LOCAL_BASE_DIR, "CCTV_1")
-    },
-    {
-        "name": "CCTV_2",
-        "remote_base_path": "/volume1/docker/mediamtx/recordings/mixcat02",
-        "local_path": os.path.join(LOCAL_BASE_DIR, "CCTV_2")
-    }
-]
+# 多監視器頻道設定 (可從環境變數自訂或解析 JSON)
+CCTV_1_NAME = os.getenv("CCTV_1_NAME", "CCTV_1")
+CCTV_1_REMOTE_PATH = os.getenv("CCTV_1_REMOTE_PATH", "/volume1/docker/mediamtx/recordings/mixcat01")
 
-# 每個監視器保留的最大影片數量 (超過 3 部則自動刪除最早的影片)
-MAX_VIDEOS = 3
+CCTV_2_NAME = os.getenv("CCTV_2_NAME", "CCTV_2")
+CCTV_2_REMOTE_PATH = os.getenv("CCTV_2_REMOTE_PATH", "/volume1/docker/mediamtx/recordings/mixcat02")
 
-# 每隔幾秒執行一次同步 (預設 60 秒 = 1 分鐘)
-SYNC_INTERVAL = 60
+env_cctv_json = os.getenv("CCTV_CONFIGS")
+if env_cctv_json:
+    try:
+        import json
+        CCTV_CONFIGS = json.loads(env_cctv_json)
+    except Exception:
+        CCTV_CONFIGS = None
+else:
+    CCTV_CONFIGS = None
+
+if not CCTV_CONFIGS:
+    CCTV_CONFIGS = [
+        {
+            "name": CCTV_1_NAME,
+            "remote_base_path": CCTV_1_REMOTE_PATH,
+            "local_path": os.path.join(LOCAL_BASE_DIR, CCTV_1_NAME)
+        },
+        {
+            "name": CCTV_2_NAME,
+            "remote_base_path": CCTV_2_REMOTE_PATH,
+            "local_path": os.path.join(LOCAL_BASE_DIR, CCTV_2_NAME)
+        }
+    ]
+
+# 每個監視器保留的最大影片數量
+MAX_VIDEOS = int(os.getenv("MAX_VIDEOS", "3"))
+
+# 每隔幾秒執行一次同步 (預設 60 秒)
+SYNC_INTERVAL = int(os.getenv("SYNC_INTERVAL", "60"))
 
 # 本地日誌檔路徑
-LOG_FILE = "video_download.log"
+LOG_FILE = os.getenv("LOG_FILE", "video_download.log")
 # ==========================================
 
 # 支援的影片副檔名
@@ -77,10 +117,11 @@ def log(msg: str):
 class NASSSHClient:
     """保持 SSH 長連接的客戶端管理器"""
 
-    def __init__(self, host, user, password):
+    def __init__(self, host, user, password, port=22):
         self.host = host
         self.user = user
         self.password = password
+        self.port = int(port)
         self.ssh = None
 
     def connect(self):
@@ -89,11 +130,12 @@ class NASSSHClient:
             if self.ssh is not None:
                 self.close()
 
-            log(f"[連線] 正在連接 NAS (SSH): {self.user}@{self.host} ...")
+            log(f"[連線] 正在連接 NAS (SSH): {self.user}@{self.host}:{self.port} ...")
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             ssh.connect(
                 hostname=self.host,
+                port=self.port,
                 username=self.user,
                 password=self.password,
                 timeout=15,
@@ -291,7 +333,7 @@ def main():
     log(f"影片上限: 每個頻道最多保留最新 {MAX_VIDEOS} 部影片")
     log("========================================================")
 
-    client = NASSSHClient(NAS_IP, NAS_USER, NAS_PASSWORD)
+    client = NASSSHClient(NAS_IP, NAS_USER, NAS_PASSWORD, port=NAS_PORT)
     client.connect()
 
     try:

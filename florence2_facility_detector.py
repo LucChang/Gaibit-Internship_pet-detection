@@ -72,13 +72,13 @@ _apply_florence2_patches()
 class Florence2FacilityDetector:
     """
     使用 microsoft/Florence-2-large 模型進行靜態設施 (litter_box, bowl) 定期物件偵測
-    採用非同步執行序機制，確保每分鐘 (60 秒) 偵測一次且不阻塞即時串流 (MJPEG Stream)
+    採用非同步執行序機制，確保每 5 秒偵測一次且不阻塞即時串流 (MJPEG Stream)
     """
 
     def __init__(
         self,
         model_id="microsoft/Florence-2-large",
-        interval_sec=60.0,
+        interval_sec=5.0,
         task_prompt="<CAPTION_TO_PHRASE_GROUNDING>",
         text_input="litter box",
         device=None,
