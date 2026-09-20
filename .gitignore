@@ -15,9 +15,15 @@ htmlcov/
 # 2. 環境變數與敏感資訊 (Environments & Secrets)
 # =========================================================
 .env
-.env.*
 .env.local
+.env.production
+.env.development
+.env.test
+.env.*
+
+# 保留範本檔，不忽略 .env.example
 !.env.example
+
 .venv/
 venv/
 env/
