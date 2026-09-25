@@ -37,7 +37,7 @@ video_download.log
 florence2_contact.log
 *.log.*
 npm-debug.log*
-
+video_download.sh
 # =========================================================
 # 4. app.py 執行產生之輸出、剪輯影片與暫存檔 (App Outputs & Clips)
 # =========================================================
